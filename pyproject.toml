@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torr-client"
+version = "0.1.0"
+description = "A small desktop BitTorrent client"
+requires-python = ">=3.10"
+dependencies = ["libtorrent>=2.0.11,<3"]
+
+[project.scripts]
+torr = "torrent_client.app:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
