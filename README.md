@@ -1,4 +1,4 @@
-# Torr
+# Torrent
 
 A compact desktop BitTorrent client written in Python with Tkinter and
 libtorrent.
