@@ -337,7 +337,14 @@ class TorrApp(tk.Tk):
         for column, (title, fields) in enumerate(definitions):
             frame = ttk.LabelFrame(groups, text=title, padding=8)
             frame.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 5, 0))
-            groups.columnconfigure(column, weight=1, uniform="torrent-details")
+            # General contains long paths, hashes, trackers, and errors, so it
+            # receives half of the inspector width. Transfer and Activity split
+            # the remaining half equally.
+            groups.columnconfigure(
+                column,
+                weight=2 if column == 0 else 1,
+                uniform="torrent-details",
+            )
             for row, (label, key) in enumerate(fields):
                 value = tk.StringVar(value="—")
                 self.detail_values[key] = value
