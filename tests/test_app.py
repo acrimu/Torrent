@@ -1,7 +1,14 @@
 import unittest
 from pathlib import Path
 
-from torrent_client.app import TorrApp, human_bytes, human_duration, progress_text
+from torrent_client.app import (
+    TorrApp,
+    eta_text,
+    human_bytes,
+    human_duration,
+    progress_text,
+    transfer_rate,
+)
 
 
 class HumanBytesTests(unittest.TestCase):
@@ -19,6 +26,14 @@ class HumanBytesTests(unittest.TestCase):
         self.assertEqual(human_duration(0), "0s")
         self.assertEqual(human_duration(3661), "1h 1m 1s")
         self.assertEqual(human_duration(90061), "1d 1h 1m 1s")
+
+    def test_hides_stale_transfer_values_when_inactive(self):
+        self.assertEqual(transfer_rate(40, inactive=True), "0.0 B/s")
+        self.assertEqual(eta_text(1000, 40, inactive=True), "—")
+
+    def test_formats_active_transfer_values(self):
+        self.assertEqual(transfer_rate(1500, inactive=False), "1.5 kB/s")
+        self.assertEqual(eta_text(3661, 1, inactive=False), "1h 1m 1s")
 
 
 class FakeEngine:

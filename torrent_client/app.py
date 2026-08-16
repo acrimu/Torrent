@@ -7,6 +7,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+from . import __version__
 from .engine import EngineUnavailable, Poller, TorrentEngine, TorrentSnapshot
 
 
@@ -32,10 +33,21 @@ def human_duration(seconds: int | float) -> str:
     return " ".join(parts)
 
 
+def transfer_rate(value: int, *, inactive: bool) -> str:
+    """Hide libtorrent's briefly stale rate after pausing or stopping."""
+    return human_bytes(0 if inactive else value, "B/s")
+
+
+def eta_text(remaining: int, download_rate: int, *, inactive: bool) -> str:
+    if inactive or download_rate <= 0 or remaining <= 0:
+        return "—"
+    return human_duration(remaining / download_rate)
+
+
 class TorrApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Torr")
+        self.title(f"Torrent client {__version__}")
         self.geometry("1080x620")
         self.minsize(820, 420)
         self._updates: queue.Queue[list[TorrentSnapshot]] = queue.Queue(maxsize=1)
@@ -138,8 +150,10 @@ class TorrApp(tk.Tk):
             live = set()
             for row in rows:
                 live.add(row.key)
+                inactive = row.paused or row.stopped
                 values = (row.name, human_bytes(row.total_size), "", progress_text(row.progress), row.status,
-                          human_bytes(row.download_rate, "B/s"), human_bytes(row.upload_rate, "B/s"), row.peers)
+                          transfer_rate(row.download_rate, inactive=inactive),
+                          transfer_rate(row.upload_rate, inactive=inactive), row.peers)
                 if self.table.exists(row.key):
                     self.table.item(row.key, values=values)
                 else:
@@ -331,10 +345,10 @@ class TorrApp(tk.Tk):
                 ttk.Label(
                     frame,
                     textvariable=value,
-                    width=27,
-                    wraplength=220,
+                    wraplength=300,
                     anchor="nw",
-                ).grid(row=row, column=1, sticky="nw", pady=2)
+                    justify="left",
+                ).grid(row=row, column=1, sticky="new", pady=2)
             frame.columnconfigure(1, weight=1)
 
     def _refresh_details(self) -> None:
@@ -346,7 +360,8 @@ class TorrApp(tk.Tk):
                 value.set("—")
             return
         remaining = max(0, snapshot.total_size - snapshot.downloaded)
-        eta = human_duration(remaining / snapshot.download_rate) if snapshot.download_rate > 0 else "—"
+        inactive = snapshot.paused or snapshot.stopped
+        eta = eta_text(remaining, snapshot.download_rate, inactive=inactive)
         # total_wanted_done represents all completed torrent payload currently
         # present, whereas all_time_download only covers this libtorrent session.
         downloaded = snapshot.downloaded

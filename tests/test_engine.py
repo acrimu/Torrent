@@ -60,6 +60,30 @@ class TemporaryNameTests(unittest.TestCase):
             self.assertEqual(params.renamed_files[1], "release/readme.txt.torrpart")
 
 
+class FakeErrorCode:
+    def __init__(self, value, message):
+        self._value = value
+        self._message = message
+
+    def value(self):
+        return self._value
+
+    def message(self):
+        return self._message
+
+
+class StatusErrorTests(unittest.TestCase):
+    def test_ignores_success_error_code(self):
+        status = SimpleNamespace(
+            errc=FakeErrorCode(0, "The operation completed successfully")
+        )
+        self.assertEqual(TorrentEngine._status_error(status), "")
+
+    def test_keeps_real_error_code(self):
+        status = SimpleNamespace(errc=FakeErrorCode(5, "Access denied"))
+        self.assertEqual(TorrentEngine._status_error(status), "Access denied")
+
+
 class FakeHandle:
     def __init__(self):
         self.current_flags = 0

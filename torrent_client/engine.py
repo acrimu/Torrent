@@ -405,6 +405,13 @@ class TorrentEngine:
         if not error:
             return ""
         try:
+            # Boost error_code objects can be truthy on Windows even when their
+            # numeric value is zero ("The operation completed successfully").
+            if int(error.value()) == 0:
+                return ""
+        except (AttributeError, TypeError, ValueError):
+            pass
+        try:
             return str(error.message())
         except Exception:
             return str(error)
