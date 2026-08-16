@@ -103,8 +103,16 @@ class TorrApp(tk.Tk):
         try:
             self.engine = TorrentEngine(base / "state", Path.home() / "Downloads")
         except EngineUnavailable as exc:
-            self.status.set(str(exc))
-            self.after(250, lambda: messagebox.showerror("Torrent engine unavailable", str(exc)))
+            message = str(exc)
+            self.status.set(message)
+            # Exception variables are cleared when the except block exits.
+            # Capture the plain string for this delayed Tkinter callback.
+            self.after(
+                250,
+                lambda message=message: messagebox.showerror(
+                    "Torrent engine unavailable", message
+                ),
+            )
             return
         self.poller = Poller(self.engine, self._queue_update)
         self.poller.start()
