@@ -1,40 +1,198 @@
 # Torr
 
-Torr is a compact Python desktop BitTorrent client. It accepts `.torrent` files and magnet links, shows transfer progress and peer counts, and supports pause, resume, removal, and restoring the torrent list between launches.
+A compact desktop BitTorrent client written in Python with Tkinter and
+libtorrent.
 
-Use Torr only to download or share content you are legally entitled to transfer.
+Torr supports `.torrent` files and magnet links, provides live transfer details,
+and deliberately avoids starting downloads without an explicit user action.
 
-## Setup
+> Use Torr only to download or share content you are legally entitled to
+> transfer.
 
-Python 3.10–3.12 is recommended because prebuilt `libtorrent` packages may lag behind the newest Python release.
+## Features
 
-### macOS (Homebrew)
+- Add local `.torrent` files and magnet links
+- Start, softly pause, stop, and resume torrents individually
+- Live progress bars, transfer rates, peer counts, and percentages
+- Detailed torrent inspector with size, verified bytes, ratio, ETA, tracker,
+  info hash, pieces, queue position, and errors
+- Right-click context menu for individual torrent actions
+- Configurable download destination
+- Persistent torrent list across application restarts
+- Automatic hash-checking of existing torrents at startup without downloading
+- `.torrpart` filenames while payload files are incomplete
+- Optional removal of downloaded data
+
+## Transfer behavior
+
+Torr is intentionally conservative about starting network activity:
+
+- A newly added torrent starts in the **Stopped** state.
+- **Start / Resume** explicitly begins downloading or seeding.
+- **Pause** keeps peer connections available but prevents new downloads and
+  throttles uploads to the minimum supported rate.
+- **Stop** disconnects peers and stops tracker activity.
+- When Torr starts, existing torrents are hash-checked and then stopped before
+  downloading or seeding can begin.
+- A fully verified torrent displays **Finished**, even though it remains
+  internally stopped until the user starts seeding it.
+
+## Requirements
+
+- Python 3.10 or newer
+- Tkinter
+- libtorrent 2.x Python bindings
+
+Python 3.10–3.12 is recommended because prebuilt libtorrent wheels may not be
+available immediately for the newest Python releases.
+
+## Installation
+
+Clone the repository and enter its directory:
+
+```bash
+git clone <repository-url>
+cd Torr
+```
+
+### macOS
+
+Install the native dependency and a supported Python version with Homebrew:
 
 ```bash
 brew install libtorrent-rasterbar python@3.12
 python3.12 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-python app.py
 ```
+
+If `pip` cannot find a compatible libtorrent wheel, use a Python version for
+which one is available or build the bindings against Homebrew's
+`libtorrent-rasterbar` installation.
 
 ### Ubuntu / Debian
 
+Use the distribution packages:
+
 ```bash
+sudo apt update
 sudo apt install python3-libtorrent python3-tk
-python3 app.py
 ```
 
-If your distribution package is unavailable, create a virtual environment and run `python -m pip install -r requirements.txt`.
+Alternatively, create a virtual environment and install the project dependency:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+## Running Torr
+
+From the repository root:
+
+```bash
+python app.py
+```
+
+The project can also be installed as a command:
+
+```bash
+python -m pip install -e .
+torr
+```
 
 ## Usage
 
-- **Add torrent** opens a local `.torrent` file.
-- **Add magnet** accepts a `magnet:?` link.
-- Select a row to pause, resume, or remove it.
-- Right-click a torrent for individual pause/resume controls, its download folder, or removal options.
-- Each torrent displays a live progress bar and percentage in the torrent list.
-- Choosing **Yes** in the removal dialog also deletes downloaded files; **No** preserves them.
+1. Select **Add torrent** or **Add magnet**.
+2. Choose the destination directory.
+3. Select the stopped torrent and click **Start / Resume**.
+4. Click a torrent to inspect its live details in the bottom panel.
+5. Right-click a torrent for pause, stop, start, folder, and removal actions.
 
-Downloads default to `~/Downloads`, while app state is stored in `~/.torr/state`.
-Previously added torrents are restored paused when Torr starts. Resume them individually when ready.
+Removing a torrent can either preserve its downloaded files or delete them.
+Deletion requires explicit confirmation.
+
+## Files and application state
+
+Downloads default to:
+
+```text
+~/Downloads
+```
+
+The saved torrent list and engine state are stored under:
+
+```text
+~/.torr/state
+```
+
+Incomplete payload files receive a `.torrpart` suffix. For example:
+
+```text
+ubuntu.iso.torrpart
+```
+
+Torr restores the original metadata-defined filenames after the entire torrent
+has finished.
+
+## Testing
+
+The test suite uses Python's standard library and does not require pytest:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+To perform a syntax check as well:
+
+```bash
+python -m compileall -q app.py torrent_client tests
+python -m unittest discover -s tests -v
+```
+
+## Project structure
+
+```text
+Torr/
+├── app.py                    # Application entry point
+├── torrent_client/
+│   ├── app.py                # Tkinter interface
+│   └── engine.py             # libtorrent integration and persistence
+├── tests/                    # Unit and regression tests
+├── pyproject.toml            # Package metadata and command entry point
+└── requirements.txt          # Runtime dependency
+```
+
+## Troubleshooting
+
+### `No module named 'libtorrent'`
+
+The Python interpreter running Torr cannot find the libtorrent binding. Confirm
+that installation and execution use the same interpreter:
+
+```bash
+python -c "import sys, libtorrent; print(sys.executable, libtorrent.__version__)"
+```
+
+### The interface still shows old behavior
+
+Python does not reload edited modules in an already running application. Fully
+quit Torr and launch it again from the repository root.
+
+### A full-size file is not 100% complete
+
+Torrent payload files may be preallocated to their final size. Torr reports
+completion from verified piece hashes, not from filesystem length, so a
+full-size file can still be incomplete or corrupted.
+
+## Development status
+
+Torr is a small desktop project under active development. Back up important data
+and verify the selected destination before using any option that deletes files.
+
+## License
+
+This project is licensed under the **MIT License**. See the `LICENSE` file for details.

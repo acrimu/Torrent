@@ -12,15 +12,24 @@ from .engine import EngineUnavailable, Poller, TorrentEngine, TorrentSnapshot
 
 def human_bytes(value: int, suffix: str = "B") -> str:
     amount = float(value)
-    for unit in ("", "Ki", "Mi", "Gi", "Ti"):
-        if abs(amount) < 1024:
+    for unit in ("", "k", "M", "G", "T"):
+        if abs(amount) < 1000:
             return f"{amount:.1f} {unit}{suffix}"
-        amount /= 1024
-    return f"{amount:.1f} Pi{suffix}"
+        amount /= 1000
+    return f"{amount:.1f} P{suffix}"
 
 
 def progress_text(progress: float) -> str:
     return f"{max(0.0, min(1.0, progress)):.1%}"
+
+
+def human_duration(seconds: int | float) -> str:
+    seconds = max(0, int(seconds))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    parts = ([f"{days}d"] if days else []) + ([f"{hours}h"] if hours or days else []) + ([f"{minutes}m"] if minutes or hours or days else []) + [f"{seconds}s"]
+    return " ".join(parts)
 
 
 class TorrApp(tk.Tk):
@@ -46,11 +55,18 @@ class TorrApp(tk.Tk):
         ttk.Button(toolbar, text="Add magnet", command=self._add_magnet).pack(side="left", padx=6)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(toolbar, text="Pause", command=lambda: self._toggle(True)).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Resume", command=lambda: self._toggle(False)).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Stop", command=self._stop_selected).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Start / Resume", command=lambda: self._toggle(False)).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Remove", command=self._remove).pack(side="left", padx=4)
 
-        table_frame = ttk.Frame(self)
-        table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        content = ttk.Panedwindow(self, orient="vertical")
+        content.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        table_frame = ttk.Frame(content)
+        details_frame = ttk.Frame(content, padding=(4, 8))
+        # The list absorbs window-size changes; the inspector keeps its height
+        # and remains anchored above the bottom status line.
+        content.add(table_frame, weight=1)
+        content.add(details_frame, weight=0)
         columns = ("name", "size", "progress", "percent", "status", "down", "up", "peers")
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
         labels = {"name": "Name", "size": "Size", "progress": "Progress", "percent": "%", "status": "Status", "down": "Download", "up": "Upload", "peers": "Peers"}
@@ -66,15 +82,19 @@ class TorrApp(tk.Tk):
         self.table.bind("<Button-2>", self._show_context_menu)
         self.table.bind("<Control-Button-1>", self._show_context_menu)
         self.table.bind("<Configure>", lambda _event: self.after_idle(self._position_progress_bars))
+        self.table.bind("<<TreeviewSelect>>", lambda _event: self._refresh_details())
 
         self.context_menu = tk.Menu(self, tearoff=False)
         self.context_menu.add_command(label="Pause", command=lambda: self._toggle(True))
-        self.context_menu.add_command(label="Resume", command=lambda: self._toggle(False))
+        self.context_menu.add_command(label="Stop", command=self._stop_selected)
+        self.context_menu.add_command(label="Start / Resume", command=lambda: self._toggle(False))
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Open download folder", command=self._open_download_folder)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Remove (keep files)", command=lambda: self._remove_selected(False))
         self.context_menu.add_command(label="Remove and delete files…", command=lambda: self._remove_selected(True))
+
+        self._build_details(details_frame)
         self.status = tk.StringVar(value="Starting torrent engine…")
         ttk.Label(self, textvariable=self.status, padding=(10, 6)).pack(fill="x")
 
@@ -123,6 +143,7 @@ class TorrApp(tk.Tk):
                     if bar:
                         bar.destroy()
             self._sync_progress_bars(rows)
+            self._refresh_details()
             self.status.set(f"{len(rows)} torrent{'s' if len(rows) != 1 else ''}")
         self.after(250, self._drain_updates)
 
@@ -158,7 +179,8 @@ class TorrApp(tk.Tk):
     def _safe_add(self, source: str, destination: Path) -> None:
         try:
             assert self.engine is not None
-            self.engine.add(source, destination)
+            # Adding a torrent must never implicitly start network transfer.
+            self.engine.add(source, destination, start_paused=True)
         except Exception as exc:
             messagebox.showerror("Could not add torrent", str(exc))
 
@@ -173,6 +195,14 @@ class TorrApp(tk.Tk):
                 (self.engine.pause if pause else self.engine.resume)(key)
             except Exception as exc:
                 messagebox.showerror("Could not update torrent", str(exc))
+
+    def _stop_selected(self) -> None:
+        key = self._selected()
+        if key and self.engine:
+            try:
+                self.engine.stop(key)
+            except Exception as exc:
+                messagebox.showerror("Could not stop torrent", str(exc))
 
     def _remove(self) -> None:
         key = self._selected()
@@ -215,8 +245,10 @@ class TorrApp(tk.Tk):
         self.table.selection_set(key)
         self.table.focus(key)
         snapshot = self._snapshots.get(key)
-        self.context_menu.entryconfigure("Pause", state="disabled" if snapshot and snapshot.paused else "normal")
-        self.context_menu.entryconfigure("Resume", state="normal" if snapshot and snapshot.paused else "disabled")
+        inactive = bool(snapshot and (snapshot.paused or snapshot.stopped))
+        self.context_menu.entryconfigure("Pause", state="disabled" if inactive else "normal")
+        self.context_menu.entryconfigure("Stop", state="disabled" if snapshot and snapshot.stopped else "normal")
+        self.context_menu.entryconfigure("Start / Resume", state="normal" if inactive else "disabled")
         try:
             self.context_menu.tk_popup(x_root, y_root)
         finally:
@@ -268,6 +300,72 @@ class TorrApp(tk.Tk):
                 continue
             x, y, width, height = box
             bar.place(x=x + 3, y=y + 2, width=max(1, width - 6), height=max(1, height - 4))
+
+    def _build_details(self, parent: ttk.Frame) -> None:
+        self.detail_title = tk.StringVar(value="Select a torrent to see its details")
+        ttk.Label(parent, textvariable=self.detail_title, font=("TkDefaultFont", 12, "bold")).pack(fill="x", pady=(0, 7))
+        groups = ttk.Frame(parent)
+        groups.pack(fill="both", expand=True)
+        self.detail_values: dict[str, tk.StringVar] = {}
+        definitions = (
+            ("General", (("Status", "status"), ("Save location", "path"), ("Info hash", "hash"), ("Tracker", "tracker"), ("Error", "error"))),
+            ("Transfer", (("Downloaded", "downloaded"), ("Uploaded", "uploaded"), ("Ratio", "ratio"), ("Remaining", "remaining"), ("ETA", "eta"), ("Wasted", "wasted"))),
+            ("Activity", (("Seeds / peers", "swarm"), ("Connections", "connections"), ("Pieces", "pieces"), ("Queue position", "queue"), ("Active time", "active"), ("Seeding time", "seeding"))),
+        )
+        for column, (title, fields) in enumerate(definitions):
+            frame = ttk.LabelFrame(groups, text=title, padding=8)
+            frame.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 5, 0))
+            groups.columnconfigure(column, weight=1, uniform="torrent-details")
+            for row, (label, key) in enumerate(fields):
+                value = tk.StringVar(value="—")
+                self.detail_values[key] = value
+                ttk.Label(frame, text=f"{label}:").grid(row=row, column=0, sticky="nw", padx=(0, 8), pady=2)
+                ttk.Label(
+                    frame,
+                    textvariable=value,
+                    width=27,
+                    wraplength=220,
+                    anchor="nw",
+                ).grid(row=row, column=1, sticky="nw", pady=2)
+            frame.columnconfigure(1, weight=1)
+
+    def _refresh_details(self) -> None:
+        key = self._selected()
+        snapshot = self._snapshots.get(key or "")
+        if not snapshot:
+            self.detail_title.set("Select a torrent to see its details")
+            for value in self.detail_values.values():
+                value.set("—")
+            return
+        remaining = max(0, snapshot.total_size - snapshot.downloaded)
+        eta = human_duration(remaining / snapshot.download_rate) if snapshot.download_rate > 0 else "—"
+        # total_wanted_done represents all completed torrent payload currently
+        # present, whereas all_time_download only covers this libtorrent session.
+        downloaded = snapshot.downloaded
+        uploaded = snapshot.all_time_uploaded or snapshot.uploaded
+        ratio = uploaded / downloaded if downloaded else 0.0
+        self.detail_title.set(snapshot.name)
+        values = {
+            "status": snapshot.status,
+            "path": snapshot.save_path or "—",
+            "hash": snapshot.key,
+            "tracker": snapshot.tracker or "—",
+            "error": snapshot.error or "None",
+            "downloaded": human_bytes(downloaded),
+            "uploaded": human_bytes(uploaded),
+            "ratio": f"{ratio:.3f}",
+            "remaining": human_bytes(remaining),
+            "eta": eta,
+            "wasted": human_bytes(snapshot.wasted),
+            "swarm": f"{snapshot.seeds} seeds / {snapshot.peers} peers",
+            "connections": str(snapshot.connections),
+            "pieces": f"{snapshot.pieces} / {snapshot.total_pieces or '—'}",
+            "queue": str(snapshot.queue_position) if snapshot.queue_position >= 0 else "—",
+            "active": human_duration(snapshot.active_time),
+            "seeding": human_duration(snapshot.seeding_time),
+        }
+        for key, value in values.items():
+            self.detail_values[key].set(value)
 
     def _close(self) -> None:
         if self.poller:
