@@ -40,6 +40,14 @@ class TorrentSnapshot:
     error: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class TorrentFile:
+    index: int
+    path: str
+    size: int
+    selected: bool
+
+
 class TorrentEngine:
     """Small thread-safe wrapper around libtorrent's session API."""
 
@@ -71,9 +79,11 @@ class TorrentEngine:
         self._sources: dict[str, dict[str, Any]] = {}
         self._startup_checks: set[str] = set()
         self._startup_checks_started: set[str] = set()
+        self._pending_checks: set[str] = set()
         self._temp_names_applied: set[str] = set()
         self._final_names_applied: set[str] = set()
         self._soft_paused: dict[str, tuple[int, bool]] = {}
+        self._file_priorities_applied: set[str] = set()
         # Keep the session stopped while check-only handles are constructed.
         # Resuming the session lets disk checks run; stop_when_ready prevents
         # the subsequent download/seeding phase.
@@ -91,7 +101,9 @@ class TorrentEngine:
         *,
         start_paused: bool = False,
         check_only: bool = False,
+        check_before_start: bool = False,
         known_downloaded: int = 0,
+        file_priorities: list[int] | None = None,
     ) -> str:
         target = str((save_path or self.download_dir).expanduser().resolve())
         Path(target).mkdir(parents=True, exist_ok=True)
@@ -109,20 +121,23 @@ class TorrentEngine:
                 params = self.lt.add_torrent_params()
                 params.ti = info
                 params.save_path = target
-            names_prepared = self._prepare_temporary_names(params, check_only=check_only)
+            names_prepared = self._prepare_temporary_names(
+                params,
+                check_only=check_only or check_before_start,
+            )
             if check_only:
                 # Allow disk verification, but atomically stop on the transition
                 # to downloading/seeding. This is libtorrent's race-free mode
                 # for "check files without starting the transfer".
                 params.flags |= self.lt.torrent_flags.stop_when_ready
                 params.flags &= ~self.lt.torrent_flags.paused
-            elif start_paused:
+            elif start_paused or check_before_start:
                 params.flags |= self.lt.torrent_flags.paused
                 params.flags &= ~self.lt.torrent_flags.auto_managed
             handle = self.session.add_torrent(params)
             if check_only:
                 handle.force_recheck()
-            elif start_paused:
+            elif start_paused or check_before_start:
                 # Belt-and-suspenders protection for libtorrent versions that
                 # apply add flags asynchronously.
                 handle.pause()
@@ -132,11 +147,19 @@ class TorrentEngine:
                 self._temp_names_applied.add(key)
             if check_only:
                 self._startup_checks.add(key)
+            if check_before_start:
+                self._pending_checks.add(key)
             self._sources[key] = {
                 "source": source,
                 "save_path": target,
                 "downloaded": max(0, int(known_downloaded)),
             }
+            if file_priorities is not None:
+                self._sources[key]["file_priorities"] = [
+                    max(0, int(priority)) for priority in file_priorities
+                ]
+                if self._apply_saved_file_priorities(key, handle):
+                    self._file_priorities_applied.add(key)
             self._save_sources()
             return key
 
@@ -145,6 +168,10 @@ class TorrentEngine:
             handle = self._handles.pop(key, None)
             self._sources.pop(key, None)
             self._soft_paused.pop(key, None)
+            self._file_priorities_applied.discard(key)
+            self._pending_checks.discard(key)
+            self._startup_checks.discard(key)
+            self._startup_checks_started.discard(key)
             if handle is not None:
                 if delete_files:
                     self.session.remove_torrent(handle, self.lt.options_t.delete_files)
@@ -180,7 +207,64 @@ class TorrentEngine:
         with self._lock:
             handle = self._handles[key]
             self._leave_soft_pause(key, handle)
+            if key in self._pending_checks:
+                self._pending_checks.discard(key)
+                self._startup_checks.add(key)
+                handle.force_recheck()
             handle.resume()
+
+    def files(self, key: str) -> list[TorrentFile]:
+        """Return selectable payload files; an empty list means no metadata yet."""
+        with self._lock:
+            handle = self._handles[key]
+            info = handle.torrent_file()
+            if not info:
+                return []
+            storage = info.files()
+            priorities = list(handle.file_priorities())
+            result: list[TorrentFile] = []
+            for index in range(storage.num_files()):
+                try:
+                    if storage.pad_file_at(index):
+                        continue
+                except (AttributeError, TypeError):
+                    pass
+                priority = int(priorities[index]) if index < len(priorities) else 4
+                result.append(TorrentFile(
+                    index=index,
+                    path=str(storage.file_path(index)),
+                    size=int(storage.file_size(index)),
+                    selected=priority > 0,
+                ))
+            return result
+
+    def select_files(self, key: str, selected_indices: set[int]) -> None:
+        """Enable selected payload files and disable all other payload files."""
+        with self._lock:
+            handle = self._handles[key]
+            info = handle.torrent_file()
+            if not info:
+                raise ValueError("The file list is not available until torrent metadata has been fetched.")
+            storage = info.files()
+            priorities: list[int] = []
+            for index in range(storage.num_files()):
+                is_padding = False
+                try:
+                    is_padding = bool(storage.pad_file_at(index))
+                except (AttributeError, TypeError):
+                    pass
+                priorities.append(0 if is_padding or index not in selected_indices else 4)
+            handle.prioritize_files(self._priority_values(priorities))
+            self._sources[key]["file_priorities"] = priorities
+            # A persisted aggregate from another selection is not meaningful.
+            self._sources[key]["downloaded"] = 0
+            self._file_priorities_applied.add(key)
+            # Changing the wanted set can move the torrent out of Finished.
+            # Re-evaluate names per file instead of keeping the previous
+            # torrent-wide naming decision.
+            self._final_names_applied.discard(key)
+            self._temp_names_applied.discard(key)
+            self._save_sources()
 
     def _leave_soft_pause(self, key: str, handle: object) -> None:
         settings = self._soft_paused.pop(key, None)
@@ -199,24 +283,29 @@ class TorrentEngine:
                 if not handle.is_valid():
                     continue
                 s = handle.status()
+                if (
+                    key not in self._file_priorities_applied
+                    and self._apply_saved_file_priorities(key, handle)
+                ):
+                    self._file_priorities_applied.add(key)
+                    s = handle.status()
                 state = int(s.state)
                 if key in self._startup_checks and state in (1, 7) and not bool(s.paused):
                     self._startup_checks_started.add(key)
-                check_finished = (
-                    key in self._startup_checks_started
-                    and bool(s.paused)
-                    and state in (3, 4, 5)
-                )
+                check_finished = key in self._startup_checks_started and state in (3, 4, 5)
                 if check_finished:
                     self._startup_checks.discard(key)
                     self._startup_checks_started.discard(key)
                     save_verified_state = True
                 self._manage_file_names(key, handle, s)
-                total = max(int(s.total_wanted or 0), self._total_size(handle))
+                full_size = self._total_size(handle)
+                wanted = int(s.total_wanted or 0)
+                has_selection = "file_priorities" in self._sources.get(key, {})
+                total = wanted if has_selection else max(wanted, full_size)
                 checked_bytes = int(s.total_wanted_done or 0)
                 if key in self._startup_checks:
-                    # Once stop_when_ready lands in a transfer-ready state, the
-                    # disk check is authoritative—even if files disappeared.
+                    # During a requested disk check, verified bytes are
+                    # authoritative—even if files disappeared since shutdown.
                     completed = checked_bytes
                 else:
                     completed = max(
@@ -225,7 +314,8 @@ class TorrentEngine:
                     )
                 if state in (4, 5) or bool(getattr(s, "is_seeding", False)):
                     completed = total
-                progress = completed / total if total > 0 else float(s.progress)
+                completed = min(completed, total) if total > 0 else 0
+                progress = completed / total if total > 0 else 0.0
                 self._sources[key]["downloaded"] = completed
                 soft_paused = key in self._soft_paused
                 stopped = bool(s.paused)
@@ -292,13 +382,15 @@ class TorrentEngine:
             return
         for entry in entries:
             try:
-                # Restored torrents verify their files, then stop before any
-                # payload transfer until explicitly resumed by the user.
+                # Restored torrents remain stopped without hashing. Their first
+                # explicit resume performs a recheck before transfer begins.
                 self.add(
                     entry["source"],
                     Path(entry["save_path"]),
-                    check_only=True,
+                    start_paused=True,
+                    check_before_start=True,
                     known_downloaded=int(entry.get("downloaded", 0) or 0),
+                    file_priorities=entry.get("file_priorities"),
                 )
             except Exception:
                 continue
@@ -306,6 +398,23 @@ class TorrentEngine:
     def _save_sources(self) -> None:
         data = list(self._sources.values())
         (self.state_dir / "torrents.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def _apply_saved_file_priorities(self, key: str, handle: object) -> bool:
+        priorities = self._sources.get(key, {}).get("file_priorities")
+        if priorities is None or not handle.torrent_file():
+            return False
+        handle.prioritize_files(self._priority_values(priorities))
+        return True
+
+    def _priority_values(self, priorities: list[int]) -> list[object]:
+        priority_type = getattr(self.lt, "download_priority_t", None)
+        if priority_type is None:
+            return list(priorities)
+        try:
+            return [priority_type(priority) for priority in priorities]
+        except (TypeError, ValueError):
+            # Older bindings accept integer priorities directly.
+            return list(priorities)
 
     def _key(self, handle: object) -> str:
         return str(handle.info_hashes().v1 or handle.info_hashes().v2)
@@ -347,20 +456,51 @@ class TorrentEngine:
         # Only transfer-ready completion states count. Progress may still read
         # 100% briefly while a forced startup recheck is in progress.
         state = int(getattr(status, "state", -1))
-        if key in self._startup_checks:
+        if key in getattr(self, "_pending_checks", set()) or key in self._startup_checks:
             return
-        finished = bool(getattr(status, "is_seeding", False)) or state in (4, 5)
+        wanted = int(getattr(status, "total_wanted", 0) or 0)
+        wanted_done = int(getattr(status, "total_wanted_done", 0) or 0)
+        finished = (
+            bool(getattr(status, "is_seeding", False))
+            or state in (4, 5)
+            or (wanted > 0 and wanted_done >= wanted)
+        )
         if finished:
             if key in self._final_names_applied:
                 return
+            priorities = list(handle.file_priorities())
+            storage = info.files()
+            base = Path(self._sources.get(key, {}).get("save_path", ""))
+            all_final = True
             for index, original in self._original_names(info).items():
+                if index < len(priorities) and int(priorities[index]) <= 0:
+                    continue
+                final_path = base / original
+                temporary_path = base / f"{original}{self.TEMP_SUFFIX}"
+                # Empty files may have no physical directory entry at all.
+                if final_path.exists() or (
+                    int(storage.file_size(index)) == 0 and not temporary_path.exists()
+                ):
+                    continue
                 handle.rename_file(index, original)
-            self._final_names_applied.add(key)
-            self._temp_names_applied.discard(key)
+                # rename_file is asynchronous. Keep checking on later polls and
+                # retry if needed instead of assuming the request succeeded.
+                all_final = False
+            if all_final:
+                self._final_names_applied.add(key)
+                self._temp_names_applied.discard(key)
             return
         if key not in self._temp_names_applied:
-            for index, temporary in self._temporary_renames(info).items():
-                handle.rename_file(index, temporary)
+            priorities = list(handle.file_priorities())
+            progress = list(handle.file_progress())
+            storage = info.files()
+            for index, original in self._original_names(info).items():
+                if index < len(priorities) and int(priorities[index]) <= 0:
+                    continue
+                size = int(storage.file_size(index))
+                completed = int(progress[index]) if index < len(progress) else 0
+                target = original if completed >= size else f"{original}{self.TEMP_SUFFIX}"
+                handle.rename_file(index, target)
             self._temp_names_applied.add(key)
 
     def _temporary_renames(self, info: object) -> dict[int, str]:

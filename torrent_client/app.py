@@ -47,7 +47,7 @@ def eta_text(remaining: int, download_rate: int, *, inactive: bool) -> str:
 class TorrApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"Torrent client {__version__}")
+        self.title(f"TorrentClient {__version__}")
         self.geometry("1080x620")
         self.minsize(820, 420)
         self._updates: queue.Queue[list[TorrentSnapshot]] = queue.Queue(maxsize=1)
@@ -70,6 +70,7 @@ class TorrApp(tk.Tk):
         ttk.Button(toolbar, text="Stop", command=self._stop_selected).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Start / Resume", command=lambda: self._toggle(False)).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Remove", command=self._remove).pack(side="left", padx=4)
+        ttk.Button(toolbar, text="Select files…", command=self._select_files).pack(side="left", padx=4)
 
         content = ttk.Panedwindow(self, orient="vertical")
         content.pack(fill="both", expand=True, padx=10, pady=(0, 8))
@@ -102,6 +103,7 @@ class TorrApp(tk.Tk):
         self.context_menu.add_command(label="Start / Resume", command=lambda: self._toggle(False))
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Open download folder", command=self._open_download_folder)
+        self.context_menu.add_command(label="Select files…", command=self._select_files)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Remove (keep files)", command=lambda: self._remove_selected(False))
         self.context_menu.add_command(label="Remove and delete files…", command=lambda: self._remove_selected(True))
@@ -171,7 +173,7 @@ class TorrApp(tk.Tk):
 
     def _require_engine(self) -> TorrentEngine | None:
         if self.engine is None:
-            messagebox.showerror("Torrent engine unavailable", "Install python-libtorrent, then restart Torr.")
+            messagebox.showerror("Torrent engine unavailable", "Install python-libtorrent, then restart TorrentClient.")
         return self.engine
 
     def _choose_destination(self) -> Path | None:
@@ -290,6 +292,106 @@ class TorrApp(tk.Tk):
                 subprocess.Popen(["xdg-open", snapshot.save_path])
         except OSError as exc:
             messagebox.showerror("Could not open folder", str(exc))
+
+    def _select_files(self) -> None:
+        key = self._selected()
+        if not key or not self.engine:
+            return
+        try:
+            files = self.engine.files(key)
+        except Exception as exc:
+            messagebox.showerror("Could not read file list", str(exc))
+            return
+        if not files:
+            messagebox.showinfo(
+                "File list unavailable",
+                "Torrent metadata has not been fetched yet. Start the torrent to fetch "
+                "its metadata, then stop it and open Select files again.",
+            )
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Select files to download")
+        dialog.geometry("760x460")
+        dialog.minsize(520, 320)
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(
+            dialog,
+            text="Choose which files belong to this download. Double-click a row to toggle it.",
+            padding=(10, 10, 10, 6),
+        ).pack(fill="x")
+        frame = ttk.Frame(dialog, padding=(10, 0, 10, 8))
+        frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(
+            frame,
+            columns=("selected", "size", "path"),
+            show="headings",
+            selectmode="extended",
+        )
+        tree.heading("selected", text="Download")
+        tree.heading("size", text="Size")
+        tree.heading("path", text="File")
+        tree.column("selected", width=85, stretch=False, anchor="center")
+        tree.column("size", width=95, stretch=False, anchor="e")
+        tree.column("path", width=500, anchor="w")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        selected = {item.index for item in files if item.selected}
+        for item in files:
+            tree.insert(
+                "",
+                "end",
+                iid=str(item.index),
+                values=("Yes" if item.selected else "No", human_bytes(item.size), item.path),
+            )
+
+        def set_rows(indices: set[int], enabled: bool) -> None:
+            for index in indices:
+                if enabled:
+                    selected.add(index)
+                else:
+                    selected.discard(index)
+                values = list(tree.item(str(index), "values"))
+                values[0] = "Yes" if enabled else "No"
+                tree.item(str(index), values=values)
+
+        def toggle(_event: tk.Event | None = None) -> None:
+            indices = {int(item) for item in tree.selection()}
+            if not indices:
+                return
+            enable = any(index not in selected for index in indices)
+            set_rows(indices, enable)
+
+        def apply_selection() -> None:
+            if not selected and not messagebox.askyesno(
+                "Download no files?",
+                "No files are selected. Keep this torrent without downloading its files?",
+                parent=dialog,
+            ):
+                return
+            try:
+                assert self.engine is not None
+                self.engine.select_files(key, selected)
+            except Exception as exc:
+                messagebox.showerror("Could not update file selection", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+
+        tree.bind("<Double-1>", toggle)
+        buttons = ttk.Frame(dialog, padding=(10, 0, 10, 10))
+        buttons.pack(fill="x")
+        all_indices = {item.index for item in files}
+        ttk.Button(buttons, text="Select all", command=lambda: set_rows(all_indices, True)).pack(side="left")
+        ttk.Button(buttons, text="Select none", command=lambda: set_rows(all_indices, False)).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right")
+        ttk.Button(buttons, text="Apply", command=apply_selection).pack(side="right", padx=6)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        tree.focus_set()
 
     def _scroll_table(self, *args: str) -> None:
         self.table.yview(*args)

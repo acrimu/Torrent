@@ -1,17 +1,18 @@
-# Torrent
+# TorrentClient
 
 A compact desktop BitTorrent client written in Python with Tkinter and
 libtorrent.
 
-Torr supports `.torrent` files and magnet links, provides live transfer details,
+TorrentClient supports `.torrent` files and magnet links, provides live transfer details,
 and deliberately avoids starting downloads without an explicit user action.
 
-> Use Torr only to download or share content you are legally entitled to
+> Use TorrentClient only to download or share content you are legally entitled to
 > transfer.
 
 ## Features
 
 - Add local `.torrent` files and magnet links
+- Select which files to download from multi-file torrents
 - Start, softly pause, stop, and resume torrents individually
 - Live progress bars, transfer rates, peer counts, and percentages
 - Detailed torrent inspector with size, verified bytes, ratio, ETA, tracker,
@@ -19,21 +20,23 @@ and deliberately avoids starting downloads without an explicit user action.
 - Right-click context menu for individual torrent actions
 - Configurable download destination
 - Persistent torrent list across application restarts
-- Automatic hash-checking of existing torrents at startup without downloading
+- Hash-checking of restored torrents when Start / Resume is clicked
 - `.torrpart` filenames while payload files are incomplete
 - Optional removal of downloaded data
 
 ## Transfer behavior
 
-Torr is intentionally conservative about starting network activity:
+TorrentClient is intentionally conservative about starting network activity:
 
 - A newly added torrent starts in the **Stopped** state.
 - **Start / Resume** explicitly begins downloading or seeding.
 - **Pause** keeps peer connections available but prevents new downloads and
   throttles uploads to the minimum supported rate.
 - **Stop** disconnects peers and stops tracker activity.
-- When Torr starts, existing torrents are hash-checked and then stopped before
-  downloading or seeding can begin.
+- When TorrentClient starts, existing torrents remain stopped and are not
+  hash-checked automatically.
+- The first **Start / Resume** after launch verifies existing files before any
+  downloading or seeding begins.
 - A fully verified torrent displays **Finished**, even though it remains
   internally stopped until the user starts seeding it.
 
@@ -52,7 +55,7 @@ Clone the repository and enter its directory:
 
 ```bash
 git clone <repository-url>
-cd Torr
+cd Torrent
 ```
 
 ### macOS
@@ -89,12 +92,12 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## Running Torr
+## Running TorrentClient
 
 From the repository root:
 
 ```bash
-python app.py
+python TorrentClient.py
 ```
 
 The project can also be installed as a command:
@@ -104,6 +107,16 @@ python -m pip install -e .
 torr
 ```
 
+### Building a Windows executable
+
+With PyInstaller installed, run:
+
+```powershell
+pyinstaller TorrentClient.spec
+```
+
+The executable is created at `dist\TorrentClient.exe`.
+
 ## Usage
 
 1. Select **Add torrent** or **Add magnet**.
@@ -111,6 +124,11 @@ torr
 3. Select the stopped torrent and click **Start / Resume**.
 4. Click a torrent to inspect its live details in the bottom panel.
 5. Right-click a torrent for pause, stop, start, folder, and removal actions.
+
+For a multi-file torrent, select it and click **Select files…** before starting
+the download. Magnet links need to fetch their metadata before the file list is
+available; start the magnet briefly, stop it after metadata appears, and then
+choose its files.
 
 Removing a torrent can either preserve its downloaded files or delete them.
 Deletion requires explicit confirmation.
@@ -135,7 +153,7 @@ Incomplete payload files receive a `.torrpart` suffix. For example:
 ubuntu.iso.torrpart
 ```
 
-Torr restores the original metadata-defined filenames after the entire torrent
+TorrentClient restores the original metadata-defined filenames after the entire torrent
 has finished.
 
 ## Testing
@@ -149,15 +167,15 @@ python -m unittest discover -s tests -v
 To perform a syntax check as well:
 
 ```bash
-python -m compileall -q app.py torrent_client tests
+python -m compileall -q TorrentClient.py torrent_client tests
 python -m unittest discover -s tests -v
 ```
 
 ## Project structure
 
 ```text
-Torr/
-├── app.py                    # Application entry point
+Torrent/
+├── TorrentClient.py          # Application entry point
 ├── torrent_client/
 │   ├── app.py                # Tkinter interface
 │   └── engine.py             # libtorrent integration and persistence
@@ -170,7 +188,7 @@ Torr/
 
 ### `No module named 'libtorrent'`
 
-The Python interpreter running Torr cannot find the libtorrent binding. Confirm
+The Python interpreter running TorrentClient cannot find the libtorrent binding. Confirm
 that installation and execution use the same interpreter:
 
 ```bash
@@ -180,17 +198,17 @@ python -c "import sys, libtorrent; print(sys.executable, libtorrent.__version__)
 ### The interface still shows old behavior
 
 Python does not reload edited modules in an already running application. Fully
-quit Torr and launch it again from the repository root.
+quit TorrentClient and launch it again from the repository root.
 
 ### A full-size file is not 100% complete
 
-Torrent payload files may be preallocated to their final size. Torr reports
+Torrent payload files may be preallocated to their final size. TorrentClient reports
 completion from verified piece hashes, not from filesystem length, so a
 full-size file can still be incomplete or corrupted.
 
 ## Development status
 
-Torr is a small desktop project under active development. Back up important data
+TorrentClient is a small desktop project under active development. Back up important data
 and verify the selected destination before using any option that deletes files.
 
 ## License
