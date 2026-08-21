@@ -222,6 +222,8 @@ class TorrentEngine:
                 return []
             storage = info.files()
             priorities = list(handle.file_priorities())
+            progress = list(handle.file_progress())
+            has_saved_selection = "file_priorities" in self._sources.get(key, {})
             result: list[TorrentFile] = []
             for index in range(storage.num_files()):
                 try:
@@ -230,11 +232,15 @@ class TorrentEngine:
                 except (AttributeError, TypeError):
                     pass
                 priority = int(priorities[index]) if index < len(priorities) else 4
+                completed = int(progress[index]) if index < len(progress) else 0
                 result.append(TorrentFile(
                     index=index,
                     path=str(storage.file_path(index)),
                     size=int(storage.file_size(index)),
-                    selected=priority > 0,
+                    # Libtorrent defaults every file to wanted. For torrents
+                    # created before explicit file selection existed, infer the
+                    # initial choices from files that actually contain data.
+                    selected=priority > 0 if has_saved_selection else completed > 0,
                 ))
             return result
 

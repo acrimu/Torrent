@@ -205,6 +205,9 @@ class FakeFileHandle:
     def file_priorities(self):
         return self.priorities
 
+    def file_progress(self):
+        return [1000, 0, 0]
+
     def prioritize_files(self, priorities):
         self.priorities = list(priorities)
 
@@ -234,6 +237,23 @@ class FileSelectionTests(unittest.TestCase):
                 (1, "release/readme.txt", 200, False),
             ],
         )
+
+    def test_legacy_torrent_selects_only_files_with_progress(self):
+        engine = self.make_engine()
+        engine._handles["key"].priorities = [4, 4, 0]
+
+        files = engine.files("key")
+
+        self.assertEqual([item.selected for item in files], [True, False])
+
+    def test_saved_selection_uses_explicit_priorities(self):
+        engine = self.make_engine()
+        engine._sources["key"]["file_priorities"] = [0, 4, 0]
+        engine._handles["key"].priorities = [0, 4, 0]
+
+        files = engine.files("key")
+
+        self.assertEqual([item.selected for item in files], [False, True])
 
     def test_applies_and_persists_selected_files(self):
         engine = self.make_engine()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import queue
 import subprocess
 import sys
@@ -60,12 +61,32 @@ def torrent_drop_paths(paths: tuple[str, ...] | list[str]) -> list[Path]:
     ]
 
 
+def load_preferences(path: Path) -> dict[str, str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(value) for key, value in data.items() if isinstance(value, str)}
+
+
+def save_preferences(path: Path, preferences: dict[str, str]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(preferences, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 class TorrApp(DragDropTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"TorrentClient {__version__}")
         self.geometry("1080x620")
         self.minsize(820, 420)
+        self._preferences_path = Path.home() / ".torr" / "preferences.json"
+        self._preferences = load_preferences(self._preferences_path)
         self._updates: queue.Queue[list[TorrentSnapshot]] = queue.Queue(maxsize=1)
         self._snapshots: dict[str, TorrentSnapshot] = {}
         self._progress_bars: dict[str, tk.Canvas] = {}
@@ -194,15 +215,29 @@ class TorrApp(DragDropTk):
         return self.engine
 
     def _choose_destination(self) -> Path | None:
-        path = filedialog.askdirectory(title="Choose download folder", initialdir=str(Path.home() / "Downloads"))
-        return Path(path) if path else None
+        initial = self._remembered_directory(
+            "last_download_directory",
+            Path.home() / "Downloads",
+        )
+        path = filedialog.askdirectory(title="Choose download folder", initialdir=str(initial))
+        if not path:
+            return None
+        destination = Path(path)
+        self._remember_directory("last_download_directory", destination)
+        return destination
 
     def _add_file(self) -> None:
         engine = self._require_engine()
         if not engine:
             return
-        source = filedialog.askopenfilename(title="Open torrent", filetypes=[("Torrent files", "*.torrent"), ("All files", "*")])
+        initial = self._remembered_directory("last_torrent_directory", Path.home())
+        source = filedialog.askopenfilename(
+            title="Open torrent",
+            initialdir=str(initial),
+            filetypes=[("Torrent files", "*.torrent"), ("All files", "*")],
+        )
         if source:
+            self._remember_directory("last_torrent_directory", Path(source).parent)
             destination = self._choose_destination()
             if destination:
                 self._safe_add(source, destination)
@@ -232,11 +267,23 @@ class TorrApp(DragDropTk):
                 "Drop one or more files with the .torrent extension.",
             )
             return getattr(event, "action", "copy")
+        self._remember_directory("last_torrent_directory", paths[0].parent)
         destination = self._choose_destination()
         if destination:
             for path in paths:
                 self._safe_add(str(path), destination)
         return getattr(event, "action", "copy")
+
+    def _remembered_directory(self, key: str, fallback: Path) -> Path:
+        value = self._preferences.get(key)
+        if not value:
+            return fallback
+        remembered = Path(value)
+        return remembered if remembered.is_dir() else fallback
+
+    def _remember_directory(self, key: str, directory: Path) -> None:
+        self._preferences[key] = str(directory.expanduser().resolve())
+        save_preferences(self._preferences_path, self._preferences)
 
     def _safe_add(self, source: str, destination: Path) -> None:
         try:
@@ -357,7 +404,7 @@ class TorrApp(DragDropTk):
 
         ttk.Label(
             dialog,
-            text="Choose which files belong to this download. Double-click a row to toggle it.",
+            text="Click a checkbox or double-click a row to include or exclude a file.",
             padding=(10, 10, 10, 6),
         ).pack(fill="x")
         frame = ttk.Frame(dialog, padding=(10, 0, 10, 8))
@@ -376,16 +423,21 @@ class TorrApp(DragDropTk):
         tree.column("path", width=500, anchor="w")
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
+        tree.tag_configure("included", background="#e6f3ff")
+        tree.tag_configure("excluded", background="#ffffff")
         tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
         selected = {item.index for item in files if item.selected}
+        checked = "☑"
+        unchecked = "☐"
         for item in files:
             tree.insert(
                 "",
                 "end",
                 iid=str(item.index),
-                values=("Yes" if item.selected else "No", human_bytes(item.size), item.path),
+                values=(checked if item.selected else unchecked, human_bytes(item.size), item.path),
+                tags=("included" if item.selected else "excluded",),
             )
 
         def set_rows(indices: set[int], enabled: bool) -> None:
@@ -395,8 +447,12 @@ class TorrApp(DragDropTk):
                 else:
                     selected.discard(index)
                 values = list(tree.item(str(index), "values"))
-                values[0] = "Yes" if enabled else "No"
-                tree.item(str(index), values=values)
+                values[0] = checked if enabled else unchecked
+                tree.item(
+                    str(index),
+                    values=values,
+                    tags=("included" if enabled else "excluded",),
+                )
 
         def toggle(_event: tk.Event | None = None) -> None:
             indices = {int(item) for item in tree.selection()}
@@ -404,6 +460,20 @@ class TorrApp(DragDropTk):
                 return
             enable = any(index not in selected for index in indices)
             set_rows(indices, enable)
+
+        def click_checkbox(event: tk.Event) -> str | None:
+            if tree.identify_region(event.x, event.y) != "cell":
+                return None
+            if tree.identify_column(event.x) != "#1":
+                return None
+            item = tree.identify_row(event.y)
+            if not item:
+                return None
+            index = int(item)
+            tree.selection_set(item)
+            tree.focus(item)
+            set_rows({index}, index not in selected)
+            return "break"
 
         def apply_selection() -> None:
             if not selected and not messagebox.askyesno(
@@ -420,6 +490,7 @@ class TorrApp(DragDropTk):
                 return
             dialog.destroy()
 
+        tree.bind("<Button-1>", click_checkbox)
         tree.bind("<Double-1>", toggle)
         buttons = ttk.Frame(dialog, padding=(10, 0, 10, 10))
         buttons.pack(fill="x")

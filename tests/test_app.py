@@ -6,7 +6,9 @@ from torrent_client.app import (
     eta_text,
     human_bytes,
     human_duration,
+    load_preferences,
     progress_text,
+    save_preferences,
     transfer_rate,
     torrent_drop_paths,
 )
@@ -68,6 +70,30 @@ class AddTorrentTests(unittest.TestCase):
             torrent.touch()
             other.touch()
             self.assertEqual(torrent_drop_paths([str(torrent), str(other)]), [torrent])
+
+
+class PreferenceTests(unittest.TestCase):
+    def test_round_trips_remembered_directories(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            expected = {
+                "last_torrent_directory": str(Path(directory) / "torrents"),
+                "last_download_directory": str(Path(directory) / "downloads"),
+            }
+
+            save_preferences(path, expected)
+
+            self.assertEqual(load_preferences(path), expected)
+
+    def test_invalid_preferences_are_ignored(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "preferences.json"
+            path.write_text("not json", encoding="utf-8")
+            self.assertEqual(load_preferences(path), {})
 
 
 if __name__ == "__main__":
