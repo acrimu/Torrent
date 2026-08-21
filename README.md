@@ -12,6 +12,7 @@ and deliberately avoids starting downloads without an explicit user action.
 ## Features
 
 - Add local `.torrent` files and magnet links
+- Add one or multiple `.torrent` files by dragging them into the window
 - Select which files to download from multi-file torrents
 - Start, softly pause, stop, and resume torrents individually
 - Live progress bars, transfer rates, peer counts, and percentages
@@ -116,6 +117,12 @@ pyinstaller TorrentClient.spec
 ```
 
 The executable is created at `dist\TorrentClient.exe`.
+
+The equivalent direct command is:
+
+```powershell
+pyinstaller --onefile --noconsole --additional-hooks-dir=. TorrentClient.py
+```
 
 ## Usage
 

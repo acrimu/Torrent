@@ -8,6 +8,7 @@ from torrent_client.app import (
     human_duration,
     progress_text,
     transfer_rate,
+    torrent_drop_paths,
 )
 
 
@@ -53,6 +54,20 @@ class AddTorrentTests(unittest.TestCase):
         app._safe_add("example.torrent", destination)
 
         self.assertEqual(app.engine.added, ("example.torrent", destination, True))
+
+    def test_filters_dropped_files_to_torrents(self):
+        with self.subTest("case-insensitive extension"):
+            paths = torrent_drop_paths([__file__, str(Path(__file__).with_suffix(".TORRENT"))])
+            self.assertEqual(paths, [])
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            torrent = Path(directory) / "example.TORRENT"
+            other = Path(directory) / "notes.txt"
+            torrent.touch()
+            other.touch()
+            self.assertEqual(torrent_drop_paths([str(torrent), str(other)]), [torrent])
 
 
 if __name__ == "__main__":

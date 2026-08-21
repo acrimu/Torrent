@@ -7,6 +7,14 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except ImportError:  # Keep imports/test helpers usable before dependencies install.
+    DND_FILES = None
+    DragDropTk = tk.Tk
+else:
+    DragDropTk = TkinterDnD.Tk
+
 from . import __version__
 from .engine import EngineUnavailable, Poller, TorrentEngine, TorrentSnapshot
 
@@ -44,7 +52,15 @@ def eta_text(remaining: int, download_rate: int, *, inactive: bool) -> str:
     return human_duration(remaining / download_rate)
 
 
-class TorrApp(tk.Tk):
+def torrent_drop_paths(paths: tuple[str, ...] | list[str]) -> list[Path]:
+    return [
+        path
+        for raw_path in paths
+        if (path := Path(raw_path)).is_file() and path.suffix.lower() == ".torrent"
+    ]
+
+
+class TorrApp(DragDropTk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"TorrentClient {__version__}")
@@ -96,6 +112,7 @@ class TorrApp(tk.Tk):
         self.table.bind("<Control-Button-1>", self._show_context_menu)
         self.table.bind("<Configure>", lambda _event: self.after_idle(self._position_progress_bars))
         self.table.bind("<<TreeviewSelect>>", lambda _event: self._refresh_details())
+        self._setup_drop_target()
 
         self.context_menu = tk.Menu(self, tearoff=False)
         self.context_menu.add_command(label="Pause", command=lambda: self._toggle(True))
@@ -199,6 +216,27 @@ class TorrApp(tk.Tk):
             destination = self._choose_destination()
             if destination:
                 self._safe_add(source.strip(), destination)
+
+    def _setup_drop_target(self) -> None:
+        if DND_FILES is None:
+            return
+        for widget in (self, self.table):
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self._on_torrent_drop)
+
+    def _on_torrent_drop(self, event: tk.Event) -> str:
+        paths = torrent_drop_paths(list(self.tk.splitlist(event.data)))
+        if not paths:
+            messagebox.showwarning(
+                "No torrent files",
+                "Drop one or more files with the .torrent extension.",
+            )
+            return getattr(event, "action", "copy")
+        destination = self._choose_destination()
+        if destination:
+            for path in paths:
+                self._safe_add(str(path), destination)
+        return getattr(event, "action", "copy")
 
     def _safe_add(self, source: str, destination: Path) -> None:
         try:
