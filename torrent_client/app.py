@@ -107,7 +107,6 @@ class TorrApp(DragDropTk):
         ttk.Button(toolbar, text="Stop", command=self._stop_selected).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Start / Resume", command=lambda: self._toggle(False)).pack(side="left", padx=4)
         ttk.Button(toolbar, text="Remove", command=self._remove).pack(side="left", padx=4)
-        ttk.Button(toolbar, text="Select files…", command=self._select_files).pack(side="left", padx=4)
 
         content = ttk.Panedwindow(self, orient="vertical")
         content.pack(fill="both", expand=True, padx=10, pady=(0, 8))
@@ -141,7 +140,6 @@ class TorrApp(DragDropTk):
         self.context_menu.add_command(label="Start / Resume", command=lambda: self._toggle(False))
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Open download folder", command=self._open_download_folder)
-        self.context_menu.add_command(label="Select files…", command=self._select_files)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Remove (keep files)", command=lambda: self._remove_selected(False))
         self.context_menu.add_command(label="Remove and delete files…", command=lambda: self._remove_selected(True))
@@ -378,133 +376,157 @@ class TorrApp(DragDropTk):
         except OSError as exc:
             messagebox.showerror("Could not open folder", str(exc))
 
-    def _select_files(self) -> None:
-        key = self._selected()
-        if not key or not self.engine:
-            return
-        try:
-            files = self.engine.files(key)
-        except Exception as exc:
-            messagebox.showerror("Could not read file list", str(exc))
-            return
-        if not files:
-            messagebox.showinfo(
-                "File list unavailable",
-                "Torrent metadata has not been fetched yet. Start the torrent to fetch "
-                "its metadata, then stop it and open Select files again.",
-            )
-            return
+    def _build_file_tab(self, parent: ttk.Frame) -> None:
+        self._file_editor_key: str | None = None
+        self._file_editor_selected: set[int] = set()
+        self._file_editor_all: set[int] = set()
+        self._file_editor_dirty = False
+        self.file_tab_status = tk.StringVar(value="Select a torrent to see its files")
+        ttk.Label(parent, textvariable=self.file_tab_status).pack(fill="x", padx=8, pady=(6, 3))
 
-        dialog = tk.Toplevel(self)
-        dialog.title("Select files to download")
-        dialog.geometry("760x460")
-        dialog.minsize(520, 320)
-        dialog.transient(self)
-        dialog.grab_set()
-
-        ttk.Label(
-            dialog,
-            text="Click a checkbox or double-click a row to include or exclude a file.",
-            padding=(10, 10, 10, 6),
-        ).pack(fill="x")
-        frame = ttk.Frame(dialog, padding=(10, 0, 10, 8))
+        frame = ttk.Frame(parent, padding=(8, 0, 8, 5))
         frame.pack(fill="both", expand=True)
-        tree = ttk.Treeview(
+        self.file_tree = ttk.Treeview(
             frame,
             columns=("selected", "path", "size"),
             show="headings",
             selectmode="extended",
+            height=6,
         )
-        tree.heading("selected", text="Download")
-        tree.heading("path", text="File")
-        tree.heading("size", text="Size")
-        tree.column("selected", width=85, stretch=False, anchor="center")
-        tree.column("path", width=500, anchor="w")
-        tree.column("size", width=95, stretch=False, anchor="e")
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        tree.tag_configure("included", background="#e6f3ff")
-        tree.tag_configure("excluded", background="#ffffff")
-        tree.pack(side="left", fill="both", expand=True)
+        self.file_tree.heading("selected", text="Download")
+        self.file_tree.heading("path", text="File")
+        self.file_tree.heading("size", text="Size")
+        self.file_tree.column("selected", width=85, stretch=False, anchor="center")
+        self.file_tree.column("path", width=500, anchor="w")
+        self.file_tree.column("size", width=95, stretch=False, anchor="e")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.file_tree.yview)
+        self.file_tree.configure(yscrollcommand=scrollbar.set)
+        self.file_tree.tag_configure("included", background="#e6f3ff")
+        self.file_tree.tag_configure("excluded", background="#ffffff")
+        self.file_tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+        self.file_tree.bind("<Button-1>", self._click_file_checkbox)
+        self.file_tree.bind("<Double-1>", self._toggle_file_rows)
 
-        selected = {item.index for item in files if item.selected}
-        checked = "☑"
-        unchecked = "☐"
+        buttons = ttk.Frame(parent, padding=(8, 0, 8, 7))
+        buttons.pack(fill="x")
+        ttk.Button(
+            buttons,
+            text="Select all",
+            command=lambda: self._set_file_rows(self._file_editor_all, True),
+        ).pack(side="left")
+        ttk.Button(
+            buttons,
+            text="Select none",
+            command=lambda: self._set_file_rows(self._file_editor_all, False),
+        ).pack(side="left", padx=6)
+        self.file_apply_button = ttk.Button(
+            buttons,
+            text="Apply",
+            command=self._apply_file_selection,
+            state="disabled",
+        )
+        self.file_apply_button.pack(side="right")
+
+    def _refresh_file_list(self, key: str | None) -> None:
+        if key is not None and key == self._file_editor_key:
+            return
+        self._file_editor_key = None
+        self._file_editor_selected = set()
+        self._file_editor_all = set()
+        self._file_editor_dirty = False
+        self.file_apply_button.configure(state="disabled")
+        self.file_tree.delete(*self.file_tree.get_children())
+        if not key or not self.engine:
+            self.file_tab_status.set("Select a torrent to see its files")
+            return
+        try:
+            files = self.engine.files(key)
+        except Exception as exc:
+            self.file_tab_status.set(f"Could not read file list: {exc}")
+            return
+        if not files:
+            self.file_tab_status.set(
+                "Metadata is unavailable. Start the torrent to fetch it, then stop it to choose files."
+            )
+            return
+        self._file_editor_key = key
+        self.file_tab_status.set("Click a checkbox or double-click rows, then click Apply.")
+        self._file_editor_selected = {item.index for item in files if item.selected}
+        self._file_editor_all = {item.index for item in files}
         for item in files:
-            tree.insert(
+            self.file_tree.insert(
                 "",
                 "end",
                 iid=str(item.index),
                 values=(
-                    checked if item.selected else unchecked,
+                    "☑" if item.selected else "☐",
                     Path(item.path).name,
                     human_bytes(item.size),
                 ),
                 tags=("included" if item.selected else "excluded",),
             )
 
-        def set_rows(indices: set[int], enabled: bool) -> None:
-            for index in indices:
-                if enabled:
-                    selected.add(index)
-                else:
-                    selected.discard(index)
-                values = list(tree.item(str(index), "values"))
-                values[0] = checked if enabled else unchecked
-                tree.item(
-                    str(index),
-                    values=values,
-                    tags=("included" if enabled else "excluded",),
-                )
+    def _set_file_rows(self, indices: set[int], enabled: bool) -> None:
+        for index in indices:
+            item = str(index)
+            if not self.file_tree.exists(item):
+                continue
+            if enabled:
+                self._file_editor_selected.add(index)
+            else:
+                self._file_editor_selected.discard(index)
+            values = list(self.file_tree.item(item, "values"))
+            values[0] = "☑" if enabled else "☐"
+            self.file_tree.item(
+                item,
+                values=values,
+                tags=("included" if enabled else "excluded",),
+            )
+        if indices:
+            self._file_editor_dirty = True
+            self.file_apply_button.configure(state="normal")
 
-        def toggle(_event: tk.Event | None = None) -> None:
-            indices = {int(item) for item in tree.selection()}
-            if not indices:
-                return
-            enable = any(index not in selected for index in indices)
-            set_rows(indices, enable)
+    def _toggle_file_rows(self, _event: tk.Event | None = None) -> None:
+        indices = {int(item) for item in self.file_tree.selection()}
+        if indices:
+            self._set_file_rows(
+                indices,
+                any(index not in self._file_editor_selected for index in indices),
+            )
 
-        def click_checkbox(event: tk.Event) -> str | None:
-            if tree.identify_region(event.x, event.y) != "cell":
-                return None
-            if tree.identify_column(event.x) != "#1":
-                return None
-            item = tree.identify_row(event.y)
-            if not item:
-                return None
-            index = int(item)
-            tree.selection_set(item)
-            tree.focus(item)
-            set_rows({index}, index not in selected)
-            return "break"
+    def _click_file_checkbox(self, event: tk.Event) -> str | None:
+        if self.file_tree.identify_region(event.x, event.y) != "cell":
+            return None
+        if self.file_tree.identify_column(event.x) != "#1":
+            return None
+        item = self.file_tree.identify_row(event.y)
+        if not item:
+            return None
+        index = int(item)
+        self.file_tree.selection_set(item)
+        self.file_tree.focus(item)
+        self._set_file_rows({index}, index not in self._file_editor_selected)
+        return "break"
 
-        def apply_selection() -> None:
-            if not selected and not messagebox.askyesno(
-                "Download no files?",
-                "No files are selected. Keep this torrent without downloading its files?",
-                parent=dialog,
-            ):
-                return
-            try:
-                assert self.engine is not None
-                self.engine.select_files(key, selected)
-            except Exception as exc:
-                messagebox.showerror("Could not update file selection", str(exc), parent=dialog)
-                return
-            dialog.destroy()
-
-        tree.bind("<Button-1>", click_checkbox)
-        tree.bind("<Double-1>", toggle)
-        buttons = ttk.Frame(dialog, padding=(10, 0, 10, 10))
-        buttons.pack(fill="x")
-        all_indices = {item.index for item in files}
-        ttk.Button(buttons, text="Select all", command=lambda: set_rows(all_indices, True)).pack(side="left")
-        ttk.Button(buttons, text="Select none", command=lambda: set_rows(all_indices, False)).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right")
-        ttk.Button(buttons, text="Apply", command=apply_selection).pack(side="right", padx=6)
-        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
-        tree.focus_set()
+    def _apply_file_selection(self) -> None:
+        key = self._file_editor_key
+        if not key or not self.engine or not self._file_editor_dirty:
+            return
+        if not self._file_editor_selected and not messagebox.askyesno(
+            "Download no files?",
+            "No files are selected. Keep this torrent without downloading its files?",
+            parent=self,
+        ):
+            return
+        try:
+            self.engine.select_files(key, self._file_editor_selected)
+        except Exception as exc:
+            messagebox.showerror("Could not update file selection", str(exc), parent=self)
+            return
+        self._file_editor_dirty = False
+        self.file_apply_button.configure(state="disabled")
+        self.file_tab_status.set("File selection applied.")
 
     def _scroll_table(self, *args: str) -> None:
         self.table.yview(*args)
@@ -539,9 +561,16 @@ class TorrApp(DragDropTk):
             bar.place(x=x + 3, y=y + 2, width=max(1, width - 6), height=max(1, height - 4))
 
     def _build_details(self, parent: ttk.Frame) -> None:
+        notebook = ttk.Notebook(parent)
+        notebook.pack(fill="both", expand=True)
+        info_tab = ttk.Frame(notebook, padding=(4, 7))
+        files_tab = ttk.Frame(notebook)
+        notebook.add(info_tab, text="Info")
+        notebook.add(files_tab, text="Files")
+
         self.detail_title = tk.StringVar(value="Select a torrent to see its details")
-        ttk.Label(parent, textvariable=self.detail_title, font=("TkDefaultFont", 12, "bold")).pack(fill="x", pady=(0, 7))
-        groups = ttk.Frame(parent)
+        ttk.Label(info_tab, textvariable=self.detail_title, font=("TkDefaultFont", 12, "bold")).pack(fill="x", pady=(0, 7))
+        groups = ttk.Frame(info_tab)
         groups.pack(fill="both", expand=True)
         self.detail_values: dict[str, tk.StringVar] = {}
         definitions = (
@@ -572,6 +601,7 @@ class TorrApp(DragDropTk):
                     justify="left",
                 ).grid(row=row, column=1, sticky="new", pady=2)
             frame.columnconfigure(1, weight=1)
+        self._build_file_tab(files_tab)
 
     def _refresh_details(self) -> None:
         key = self._selected()
@@ -580,7 +610,9 @@ class TorrApp(DragDropTk):
             self.detail_title.set("Select a torrent to see its details")
             for value in self.detail_values.values():
                 value.set("—")
+            self._refresh_file_list(None)
             return
+        self._refresh_file_list(key)
         remaining = max(0, snapshot.total_size - snapshot.downloaded)
         inactive = snapshot.paused or snapshot.stopped
         eta = eta_text(remaining, snapshot.download_rate, inactive=inactive)

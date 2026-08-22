@@ -132,10 +132,10 @@ pyinstaller --onefile --noconsole --additional-hooks-dir=. TorrentClient.py
 4. Click a torrent to inspect its live details in the bottom panel.
 5. Right-click a torrent for pause, stop, start, folder, and removal actions.
 
-For a multi-file torrent, select it and click **Select files…** before starting
-the download. Magnet links need to fetch their metadata before the file list is
-available; start the magnet briefly, stop it after metadata appears, and then
-choose its files.
+For a multi-file torrent, select it, open the **Files** tab in the bottom panel,
+choose the files, and click **Apply** before starting the download. Magnet links
+need to fetch their metadata before the file list is available; start the magnet
+briefly, stop it after metadata appears, and then choose its files.
 
 Removing a torrent can either preserve its downloaded files or delete them.
 Deletion requires explicit confirmation.
