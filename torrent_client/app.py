@@ -411,16 +411,16 @@ class TorrApp(DragDropTk):
         frame.pack(fill="both", expand=True)
         tree = ttk.Treeview(
             frame,
-            columns=("selected", "size", "path"),
+            columns=("selected", "path", "size"),
             show="headings",
             selectmode="extended",
         )
         tree.heading("selected", text="Download")
-        tree.heading("size", text="Size")
         tree.heading("path", text="File")
+        tree.heading("size", text="Size")
         tree.column("selected", width=85, stretch=False, anchor="center")
-        tree.column("size", width=95, stretch=False, anchor="e")
         tree.column("path", width=500, anchor="w")
+        tree.column("size", width=95, stretch=False, anchor="e")
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         tree.tag_configure("included", background="#e6f3ff")
@@ -436,7 +436,11 @@ class TorrApp(DragDropTk):
                 "",
                 "end",
                 iid=str(item.index),
-                values=(checked if item.selected else unchecked, human_bytes(item.size), item.path),
+                values=(
+                    checked if item.selected else unchecked,
+                    Path(item.path).name,
+                    human_bytes(item.size),
+                ),
                 tags=("included" if item.selected else "excluded",),
             )
 
